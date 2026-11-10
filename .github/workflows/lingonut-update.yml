@@ -6,6 +6,7 @@ name: Lingonut - Upload ZIP
     types: [published]
   push:
     paths:
+      - ".github/workflows/lingonut-update.yml"
       - "Lingonut-Update-*.zip"
 
 permissions:
@@ -19,7 +20,6 @@ env:
   RELEASE_TAG: lingonut-full-001-055
   ARCHIVE_NAME: Lingonut-GitHub-Full-001-055-Mobile.zip
   ARCHIVE_SHA256: 14d2a464ff636ea3b0ea051500b2c0bd48c27d691ddabab18d95285c2aae59e6
-  SITE_DIR: ${{ runner.temp }}/lingonut-site
 
 jobs:
   build:
@@ -39,6 +39,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export SITE_DIR="$RUNNER_TEMP/lingonut-site"
+          printf 'SITE_DIR=%s\n' "$SITE_DIR" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/lingonut-package" "$SITE_DIR"
           gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
