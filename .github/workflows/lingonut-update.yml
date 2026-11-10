@@ -1,0 +1,89 @@
+name: Lingonut - Upload ZIP
+
+"on":
+  workflow_dispatch:
+  release:
+    types: [published]
+  push:
+    paths:
+      - "Lingonut-Update-*.zip"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lingonut-pages-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: lingonut-full-001-055
+  ARCHIVE_NAME: Lingonut-GitHub-Full-001-055-Mobile.zip
+  ARCHIVE_SHA256: 14d2a464ff636ea3b0ea051500b2c0bd48c27d691ddabab18d95285c2aae59e6
+  SITE_DIR: ${{ runner.temp }}/lingonut-site
+
+jobs:
+  build:
+    if: >-
+      (github.event_name == 'release' && github.event.release.tag_name == 'lingonut-full-001-055') ||
+      (github.event_name != 'release' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download and unpack the single ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/lingonut-package" "$SITE_DIR"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ARCHIVE_NAME" \
+            --dir "$RUNNER_TEMP/lingonut-package" --clobber
+          archive="$RUNNER_TEMP/lingonut-package/$ARCHIVE_NAME"
+          printf '%s  %s\n' "$ARCHIVE_SHA256" "$archive" | sha256sum -c -
+          unzip -q "$archive" -d "$SITE_DIR"
+          for update in "$GITHUB_WORKSPACE"/Lingonut-Update-*.zip; do
+            [ -f "$update" ] || continue
+            cp "$update" "$SITE_DIR/"
+          done
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Prepare package manager
+        run: npm install --global pnpm@11.25.0 --force --ignore-scripts
+
+      - name: Apply translation updates and build
+        working-directory: ${{ env.SITE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          GITHUB_WORKSPACE="$SITE_DIR" python3 scripts/import-translation-update.py
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run verify
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ env.SITE_DIR }}/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment
