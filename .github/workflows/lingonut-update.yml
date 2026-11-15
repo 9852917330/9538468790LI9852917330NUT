@@ -1,13 +1,11 @@
-name: Lingonut - Upload ZIP
+name: Lingonut - Upload full ZIP
 
 "on":
   workflow_dispatch:
-  release:
-    types: [published]
   push:
     paths:
       - ".github/workflows/lingonut-update.yml"
-      - "Lingonut-Update-*.zip"
+      - "Lingonut-Full-*.zip"
 
 permissions:
   contents: read
@@ -17,68 +15,109 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: lingonut-full-001-055
-  ARCHIVE_NAME: Lingonut-GitHub-Full-001-055-Mobile.zip
-  ARCHIVE_SHA256: 14d2a464ff636ea3b0ea051500b2c0bd48c27d691ddabab18d95285c2aae59e6
+  BASE_REPO: 9852917330/9538468790LI9852917330NUT
+  BASE_TAG: lingonut-full-001-055
+  BASE_FILE: Lingonut-GitHub-Full-001-055-Mobile.zip
+  BASE_SHA: 14d2a464ff636ea3b0ea051500b2c0bd48c27d691ddabab18d95285c2aae59e6
 
 jobs:
   build:
-    if: >-
-      (github.event_name == 'release' && github.event.release.tag_name == 'lingonut-full-001-055') ||
-      (github.event_name != 'release' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      ready: ${{ steps.package.outputs.ready }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
-      - name: Download and unpack the single ZIP
+      - name: Select newest complete package
+        id: package
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, zipfile
+          from pathlib import Path
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          choices = []
+          for path in root.glob('Lingonut-Full-*.zip'):
+              if path.is_symlink() or path.stat().st_size > 25 * 1024 * 1024:
+                  raise ValueError('Invalid full ZIP: ' + path.name)
+              with zipfile.ZipFile(path) as z:
+                  m = json.loads(z.read('FULL_SOURCE_MANIFEST.json'))
+              if m.get('formatVersion') != 2 or m.get('kind') != 'cumulative-source':
+                  raise ValueError('Use a Lingonut full cumulative ZIP')
+              if type(m.get('sequence')) is not int or m['sequence'] < 1:
+                  raise ValueError('Invalid full-package version')
+              choices.append((m['sequence'], m['createdAt'], str(path), m))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('ready=' + str(bool(choices)).lower() + '\n')
+          if not choices:
+              print('Ready. Upload the latest Lingonut-Full ZIP to the repository root.')
+              raise SystemExit(0)
+          _, _, chosen, manifest = max(choices, key=lambda row: row[:3])
+          with zipfile.ZipFile(chosen) as z:
+              script = z.read('scripts/cumulative-package.py')
+          row = next(r for r in manifest['files'] if r['path'] == 'scripts/cumulative-package.py')
+          if len(script) != row['bytes'] or hashlib.sha256(script).hexdigest() != row['sha256']:
+              raise ValueError('Damaged package installer')
+          temp = Path(os.environ['RUNNER_TEMP'])
+          installer = temp / 'lingonut-cumulative.py'
+          installer.write_bytes(script)
+          values = {'FULL_ZIP': chosen, 'INSTALLER': str(installer),
+                    'SITE_DIR': str(temp / 'lingonut-site'),
+                    'BASE_ZIP': str(temp / 'lingonut-base' / os.environ['BASE_FILE'])}
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              for key, value in values.items():
+                  if '\n' in value or '\r' in value:
+                      raise ValueError('Invalid package filename')
+                  out.write(key + '=' + value + '\n')
+          print('Selected:', Path(chosen).name)
+          PY
+
+      - name: Restore original shared audio and prepare complete site
+        if: steps.package.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          export SITE_DIR="$RUNNER_TEMP/lingonut-site"
-          printf 'SITE_DIR=%s\n' "$SITE_DIR" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/lingonut-package" "$SITE_DIR"
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$ARCHIVE_NAME" \
-            --dir "$RUNNER_TEMP/lingonut-package" --clobber
-          archive="$RUNNER_TEMP/lingonut-package/$ARCHIVE_NAME"
-          printf '%s  %s\n' "$ARCHIVE_SHA256" "$archive" | sha256sum -c -
-          unzip -q "$archive" -d "$SITE_DIR"
-          for update in "$GITHUB_WORKSPACE"/Lingonut-Update-*.zip; do
-            [ -f "$update" ] || continue
-            cp "$update" "$SITE_DIR/"
-          done
+          mkdir -p "$RUNNER_TEMP/lingonut-base"
+          gh release download "$BASE_TAG" --repo "$BASE_REPO" \
+            --pattern "$BASE_FILE" --dir "$RUNNER_TEMP/lingonut-base" --clobber
+          printf '%s  %s\n' "$BASE_SHA" "$BASE_ZIP" | sha256sum -c -
+          python3 "$INSTALLER" install --archive "$FULL_ZIP" \
+            --shared-base "$BASE_ZIP" --destination "$SITE_DIR"
 
       - uses: actions/setup-node@v7
+        if: steps.package.outputs.ready == 'true'
         with:
           node-version: '24'
           package-manager-cache: false
 
-      - name: Prepare package manager
-        run: npm install --global pnpm@11.25.0 --force --ignore-scripts
-
-      - name: Apply translation updates and build
+      - name: Build and check complete website
+        if: steps.package.outputs.ready == 'true'
         working-directory: ${{ env.SITE_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          GITHUB_WORKSPACE="$SITE_DIR" python3 scripts/import-translation-update.py
+          npm install --global pnpm@11.25.0 --force --ignore-scripts
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm run verify
 
       - uses: actions/configure-pages@v5
+        if: steps.package.outputs.ready == 'true'
 
       - uses: actions/upload-pages-artifact@v4
+        if: steps.package.outputs.ready == 'true'
         with:
           path: ${{ env.SITE_DIR }}/dist
 
   deploy:
     needs: build
+    if: needs.build.outputs.ready == 'true'
     runs-on: ubuntu-latest
     permissions:
       pages: write
